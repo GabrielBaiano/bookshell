@@ -8,27 +8,27 @@ SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 def get_drive_service():
     """
-    Autentica o usuário e retorna as credenciais do Google Drive.
+    Authenticates the user and returns Google Drive credentials.
     """
     creds = None
-    # O token.json guarda as permissões de acesso já concedidas
+    # token.json stores the user's access and refresh tokens
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     
-    # Se não houver credenciais válidas, pede o login
+    # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             if not os.path.exists('credentials.json'):
-                print("Erro: Arquivo 'credentials.json' não encontrado na raiz!")
+                print("Error: 'credentials.json' file not found in root!")
                 return None
                 
             flow = InstalledAppFlow.from_client_secrets_file(
                 'credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         
-        # Salva as credenciais para a próxima vez
+        # Save the credentials for the next run
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
 
@@ -36,14 +36,14 @@ def get_drive_service():
 
 def sync_drive():
     """
-    Sincroniza os livros locais com o Google Drive.
+    Synchronizes local books with Google Drive.
     """
     creds = get_drive_service()
     if creds:
-        print("Conexão com o Drive estabelecida com sucesso!")
-        # Lógica de sincronização futura aqui
+        print("Drive connection established successfully!")
+        # Future sync logic here
     else:
-        print("Falha ao sincronizar com o Google Drive.")
+        print("Failed to sync with Google Drive.")
 
 if __name__ == "__main__":
     sync_drive()

@@ -4,6 +4,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
+from bookshell.core.drive_logic import get_or_create_folder
+from bookshell.core import database_manager
 
 app = typer.Typer()
 console = Console()
@@ -13,6 +15,9 @@ def setup():
     """Complete initial setup flow."""
     console.print(Panel("[bold blue]Welcome to Bookshell[/bold blue]", subtitle="Initial Setup"))
     
+    # Initialize Database
+    database_manager.init_db()
+
     # 1. Configuration Type
     from InquirerPy import inquirer
     
@@ -43,16 +48,25 @@ def setup():
     else:
         console.print(f"[green]Using existing folder: {folder_path}[/green]")
 
+    # Save local path to DB
+    database_manager.save_config("local_path", folder_path)
+
     # 2. Google Drive Configuration
     console.print("\n[yellow]Step 2: Google Drive Configuration[/yellow]")
     console.print("We will now link your Google account to Bookshell.")
-    # Placeholder for auth logic
-    console.print("Authentication logic goes here... [dim](Opening browser...)[/dim]")
-    console.print("Successfully authenticated! [green]✔[/green]")
-
+    # This will trigger get_drive_service during folder check
+    
     # 3. Drive Folder Verification
     console.print("\n[yellow]Step 3: Cloud Verification[/yellow]")
-    console.print("Verifying 'Bookshell' folder on your Google Drive... [green]OK![/green]")
+    console.print("Verifying 'Bookshell_Files' folder on your Google Drive...")
+    folder_id = get_or_create_folder("Bookshell_Files")
+    
+    if folder_id:
+        database_manager.save_config("root_folder_id", folder_id)
+        console.print(f"Drive path secured! [green]✔[/green]")
+    else:
+        console.print("[red]Failed to verify Drive folder.[/red]")
+        raise typer.Exit()
     
     # 4. Final Instructions
     instructions = """
