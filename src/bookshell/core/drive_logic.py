@@ -51,6 +51,32 @@ def get_or_create_folder(folder_name="Bookshell_Files"):
 
     return folder_id
 
+def list_drive_files():
+    """
+    Lists all files in the Bookshell folder on Google Drive.
+    """
+    try:
+        from .database_manager import get_config
+    except ImportError:
+        from database_manager import get_config
+        
+    folder_id = get_config("root_folder_id")
+    
+    if not folder_id:
+        return []
+
+    service = get_drive_service_object()
+    if not service:
+        return []
+
+    query = f"'{folder_id}' in parents and trashed = false"
+    results = service.files().list(
+        q=query,
+        fields="files(id, name, mimeType, size)"
+    ).execute()
+    
+    return results.get('files', [])
+
 if __name__ == "__main__":
     print("Starting folder verification on Google Drive...")
     folder_id = get_or_create_folder()

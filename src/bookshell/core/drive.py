@@ -3,8 +3,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
-# Escopo: Acesso apenas aos arquivos que o Bookshell criar (Segurança máxima)
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+# Scope: Full access to Drive to allow syncing files added via browser
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 def get_drive_service():
     """

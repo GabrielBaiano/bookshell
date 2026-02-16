@@ -4,11 +4,59 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
-from bookshell.core.drive_logic import get_or_create_folder
+from rich.table import Table
+from bookshell.core.drive_logic import get_or_create_folder, list_drive_files
+from bookshell.core.library import list_local_files
 from bookshell.core import database_manager
 
 app = typer.Typer()
 console = Console()
+
+@app.command()
+def list():
+    """Display all books in your local folder and on Google Drive."""
+    console.print(Panel("[bold blue]Bookshell Library[/bold blue]"))
+    
+    # 1. Local Files
+    local_books = list_local_files()
+    
+    # 2. Drive Files
+    with console.status("[bold green]Checking Google Drive...") as status:
+        drive_books = list_drive_files()
+
+    table = Table(title="Your Books", show_header=True, header_style="bold magenta")
+    table.add_column("Source", style="dim")
+    table.add_column("Title")
+    table.add_column("Size (MB)", justify="right")
+
+    # Add Local Books
+    for book in local_books:
+        table.add_row(
+            "💻 Local", 
+            book["name"], 
+            f"{book['size'] / (1024*1024):.2f}"
+        )
+
+    # Add Drive Books
+    # Identify which drive books are also local to avoid duplicates if needed, 
+    # but for now let's just show them all separately to see the "sync status"
+    for book in drive_books:
+        # Check if already in local
+        is_local = any(lb["name"] == book["name"] for lb in local_books)
+        source = "☁️ Drive"
+        if is_local:
+            source = "✅ Synced"
+            
+        table.add_row(
+            source,
+            book["name"],
+            f"{int(book.get('size', 0)) / (1024*1024):.2f}" if book.get('size') else "N/A"
+        )
+
+    if not local_books and not drive_books:
+        console.print("[yellow]Your library is empty. Add some PDF or EPUB files![/yellow]")
+    else:
+        console.print(table)
 
 @app.command()
 def setup():
@@ -31,7 +79,7 @@ def setup():
     ).execute()
 
     if setup_type == "default":
-        folder_path = Path.home() / "Bookshell"
+        folder_path = Path.home() / "Bookshell_Library"
         console.print(f"Using default path: [cyan]{folder_path}[/cyan]")
     else:
         folder_input = console.input("[bold]Enter the path where you want to store your books:[/bold] ")
@@ -54,7 +102,16 @@ def setup():
     # 2. Google Drive Configuration
     console.print("\n[yellow]Step 2: Google Drive Configuration[/yellow]")
     console.print("We will now link your Google account to Bookshell.")
-    # This will trigger get_drive_service during folder check
+    
+    from bookshell.core.drive import get_drive_service
+    console.print("[dim]Connecting to Google Drive...[/dim]")
+    creds = get_drive_service()
+    
+    if creds:
+        console.print("Logged in successfully! [green]✔[/green]")
+    else:
+        console.print("[red]Authentication failed. Please check your credentials.json file.[/red]")
+        raise typer.Exit()
     
     # 3. Drive Folder Verification
     console.print("\n[yellow]Step 3: Cloud Verification[/yellow]")
