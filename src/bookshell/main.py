@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 import typer
 from rich.console import Console
@@ -7,7 +8,7 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from InquirerPy import inquirer
-from bookshell.core.drive_logic import get_or_create_folder, list_drive_files, upload_book, update_description, move_file, get_or_create_subfolder, download_book
+from bookshell.core.drive_logic import get_or_create_folder, list_drive_files, upload_book, update_description, move_file, get_or_create_subfolder, download_book, set_file_visibility
 from bookshell.core.library import list_local_files
 from bookshell.core import database_manager
 
@@ -419,11 +420,18 @@ def push(
 
 @app.command()
 def sync(
-    local: bool = typer.Option(False, "--local", "-l", help="Push all local changes to Drive (Push All)"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Pull all Drive changes to Local (Pull All)"),
-    all: bool = typer.Option(False, "--all", "-a", help="Bidirectional Sync (Push + Pull)")
+    local: bool = typer.Option(False, "--local", "-l", help="Push local changes to Drive (Priority: Local). Use this to upload new files."),
+    remote: bool = typer.Option(False, "--remote", "-r", help="Pull Drive changes to Local (Priority: Remote). Use this to download missing files."),
+    all: bool = typer.Option(False, "--all", "-a", help="Bidirectional Sync. Performs both Push and Pull to ensure libraries are identical.")
 ):
-    """Synchronize your library (Push, Pull, or Both)."""
+    """
+    Synchronize your library between Local and Google Drive.
+    
+    Modes:
+    --local (-l):  Uploads local files that are missing on Drive.
+    --remote (-r): Downloads Drive files that are missing locally.
+    --all (-a):    Does both! The ultimate sync command.
+    """
     
     if not (local or remote or all):
         console.print("[yellow]Please specify a mode: --local, --remote, or --all[/yellow]")
@@ -438,6 +446,175 @@ def sync(
         pull(book_name=None, all=True)
     
     console.print("\n[bold green]✨ Synchronization Complete! ✨[/bold green]")
+
+@app.command()
+def share():
+    """Share books or your entire library via Google Drive links."""
+    
+    choice = inquirer.select(
+        message="What would you like to share?",
+        choices=[
+            {"name": "Share specific files", "value": "files"},
+            {"name": "Manage Library Privacy (Public/Private)", "value": "library"},
+        ],
+    ).execute()
+
+    if choice == "files":
+        console.print("[dim]Fetching file list from Drive...[/dim]")
+        drive_books = list_drive_files()
+        
+        if not drive_books:
+            console.print("[yellow]No files found on Drive to share.[/yellow]")
+            return
+
+        choices = []
+        for b in drive_books:
+            cat = b.get('category') or 'General'
+            choices.append({"name": f"[{cat}] {b['name']}", "value": b})
+            
+        selected_books = inquirer.checkbox(
+            message="Select books to share (Space to select, Enter to confirm):",
+            choices=choices,
+            instruction="(Space to select)"
+        ).execute()
+        
+        if not selected_books:
+            console.print("[yellow]No books selected.[/yellow]")
+            return
+
+        console.print("\n[bold]Generating Links...[/bold]")
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Book")
+        table.add_column("Link")
+        
+        for book in selected_books:
+            link = set_file_visibility(book['id'], public=True)
+            table.add_row(book['name'], f"[link={link}]Click to Open[/link]" if link else "[red]Error[/red]")
+            if link:
+                console.print(f"[green]✔[/green] {book['name']}: {link}")
+        
+    elif choice == "library":
+        folder_id = database_manager.get_config("root_folder_id")
+        if not folder_id:
+            console.print("[red]Library folder not found.[/red]")
+            return
+            
+        action = inquirer.select(
+            message="Set Library Visibility:",
+            choices=[
+                {"name": "Make Public (Anyone with link can view)", "value": True},
+                {"name": "Make Private (Only you)", "value": False},
+            ],
+        ).execute()
+        
+        with console.status("[bold blue]Updating permissions..."):
+            result = set_file_visibility(folder_id, public=action)
+            
+        if action and result:
+            console.print(Panel(f"[bold green]Library is now Public![/bold green]\n\nLink: [blue underline]{result}[/blue underline]", title="Success"))
+        elif not action and result:
+            console.print("[bold green]Library is now Private.[/bold green]")
+        else:
+            console.print("[red]Failed to update permissions.[/red]")
+
+@app.command()
+def organize(
+    book_name: str = typer.Argument(None, help="Name of the book to move"),
+    category: str = typer.Argument(None, help="New category name")
+):
+    """Move a book to a different category (Folder) and sync changes."""
+    
+    local_files = list_local_files()
+    
+    # 1. Select Book
+    if not book_name:
+        choices = [f['name'] for f in local_files]
+        if not choices:
+            console.print("[yellow]No books found locally.[/yellow]")
+            return
+            
+        book_name = inquirer.fuzzy(
+            message="Select a book to organize:",
+            choices=choices,
+        ).execute()
+
+    # Find book details
+    book = next((f for f in local_files if f['name'] == book_name), None)
+    if not book:
+        console.print(f"[red]Book '{book_name}' not found locally.[/red]")
+        return
+        
+    current_cat = book.get('category') or "General"
+    
+    # 2. Select Category
+    if not category:
+        # Get existing categories + option to create new
+        existing_cats = list(set(f.get('category') for f in local_files if f.get('category')))
+        existing_cats.append("General")
+        existing_cats.sort()
+        
+        category = inquirer.select(
+            message="Select new category:",
+            choices=existing_cats + [{"name": "New Category...", "value": "NEW"}],
+            default=current_cat
+        ).execute()
+        
+        if category == "NEW":
+            category = console.input("[bold]Enter new category name:[/bold] ").strip()
+            
+    if not category:
+        console.print("[red]Invalid category.[/red]")
+        return
+        
+    if category == current_cat:
+        console.print("[yellow]Book is already in this category.[/yellow]")
+        return
+
+    # 3. Confirmation
+    if not Confirm.ask(f"Move [bold]{book_name}[/bold] from [cyan]{current_cat}[/cyan] to [magenta]{category}[/magenta]?"):
+        console.print("[red]Cancelled.[/red]")
+        return
+
+    # 4. Perform Move
+    local_root = Path(database_manager.get_config("local_path"))
+    
+    # Local Move
+    start_path = Path(book['path'])
+    dest_dir = local_root / category
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / book_name
+    
+    try:
+        shutil.move(str(start_path), str(dest_path))
+        console.print(f"[green]✔ Local file moved to '{category}'[/green]")
+    except Exception as e:
+        console.print(f"[red]Error moving local file: {e}[/red]")
+        return
+
+    # Drive Move
+    drive_books = list_drive_files()
+    drive_file = next((b for b in drive_books if b['name'] == book_name), None)
+    
+    if drive_file:
+        console.print("[dim]Moving on Google Drive...[/dim]")
+        folder_id = database_manager.get_config("root_folder_id")
+        target_folder_id = get_or_create_subfolder(folder_id, category)
+        move_file(drive_file['id'], drive_file.get('parents', []), target_folder_id)
+        console.print(f"[green]✔ Drive file moved to '{category}'[/green]")
+    else:
+        console.print("[yellow]File not found on Drive. It will be uploaded on next sync.[/yellow]")
+
+    # Update Database
+    database_manager.save_book(
+        title=book_name,
+        drive_id=drive_file['id'] if drive_file else "pending",
+        local_path=str(dest_path),
+        category=category
+    )
+
+    # 5. Sync Prompt
+    if Confirm.ask("\n[bold blue]Do you want to sync changes now?[/bold blue]"):
+        push(file_path=None, category=None, all=True)
 
 @app.command()
 def setup():

@@ -255,6 +255,50 @@ def download_book(file_id, local_path):
         
     return True
 
+def set_file_visibility(file_id, public=True):
+    """
+    Sets the visibility of a file or folder on Google Drive.
+    If public=True, makes it accessible to anyone with the link.
+    If public=False, removes public access.
+    Returns the webViewLink if public, or True if made private.
+    """
+    service = get_drive_service_object()
+    if not service:
+        return None
+
+    if public:
+        try:
+            permission = {
+                'type': 'anyone',
+                'role': 'reader',
+            }
+            # We don't check if it already exists because the API handles it gracefully (usually)
+            # or we can list first. For simplicity, try create.
+            service.permissions().create(
+                fileId=file_id,
+                body=permission,
+                fields='id'
+            ).execute()
+        except Exception:
+            # If it fails, it might already be public or other error.
+            # We continue to get the link.
+            pass
+            
+        # Get link
+        file = service.files().get(fileId=file_id, fields='webViewLink').execute()
+        return file.get('webViewLink')
+    else:
+        # Make private: remove 'anyone' permissions
+        try:
+            permissions = service.permissions().list(fileId=file_id).execute().get('permissions', [])
+            for p in permissions:
+                if p.get('type') == 'anyone':
+                    service.permissions().delete(fileId=file_id, permissionId=p['id']).execute()
+            return True
+        except Exception as e:
+            print(f"Error reverting privacy: {e}")
+            return False
+
 if __name__ == "__main__":
     print("Starting folder verification on Google Drive...")
     folder_id = get_or_create_folder()
