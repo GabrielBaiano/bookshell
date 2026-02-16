@@ -16,25 +16,17 @@ app = typer.Typer(
     help="""
     [bold blue]Bookshell CLI[/bold blue] - Your personal library manager + Google Drive Sync.
 
-    [bold]Common Commands:[/bold]
-    [green]sync[/green]      Smart synchronization (Push/Pull/Both).
-    [green]list[/green]      Show all books (Local + Drive).
-    [green]push[/green]      Upload a specific book.
-    [green]pull[/green]      Download a specific book.
-    [green]share[/green]     Generate public links.
-    [green]organize[/green]  Move books between categories.
-
-    [bold]Sync Flags (for 'sync' command):[/bold]
-    --all (-a)    [cyan]Full Sync (Push + Pull)[/cyan]
-    --local (-l)  [cyan]Push Only (Local -> Cloud)[/cyan]
-    --remote (-r) [cyan]Pull Only (Cloud -> Local)[/cyan]
+    [bold]Sync Flags (for 'sync', 'push', 'pull'):[/bold]
+    --all (-a)    [cyan]Process All / Bidirectional[/cyan]
+    --local (-l)  [cyan]Local Priority[/cyan]
+    --remote (-r) [cyan]Remote Priority[/cyan]
     """
 )
 console = Console()
 
 @app.command()
 def list(category: str = typer.Option(None, "--category", "-c", help="Filter by category")):
-    """Display all books in your local folder and on Google Drive."""
+    """List all books in Local Library and Google Drive. [Flags: --category]"""
     console.print(Panel("[bold blue]Bookshell Library[/bold blue]", expand=False))
     
     # 1. Fetch data
@@ -119,7 +111,7 @@ def list(category: str = typer.Option(None, "--category", "-c", help="Filter by 
 
 @app.command()
 def mark(book_name: str, status: str = typer.Option(..., "--status", "-s", help="Status: reading, finished, new")):
-    """Update the reading status of a book."""
+    """Update reading status (reading, finished, new). [Flags: --status]"""
     status = status.lower()
     if status not in ['reading', 'finished', 'new']:
         console.print("[red]Invalid status. Use: reading, finished, or new.[/red]")
@@ -149,13 +141,7 @@ def pull(
     book_name: str = typer.Argument(None, help="Name of the book to download (Optional if using --all)"),
     all: bool = typer.Option(False, "--all", "-a", help="Download ALL books from Drive that are missing locally")
 ):
-    """
-    Download books from Google Drive to your local library.
-    
-    Examples:
-    bookshell pull "MyBook.pdf"   (Download single file)
-    bookshell pull --all          (Download everything missing)
-    """
+    """Download books from Drive. [Flags: --all]"""
     local_root = Path(database_manager.get_config("local_path"))
     
     if all:
@@ -357,13 +343,7 @@ def push(
     category: str = typer.Option(None, "--category", "-c", help="Book category (subfolder)"),
     all: bool = typer.Option(False, "--all", "-a", help="Upload ALL local books that are missing on Drive")
 ):
-    """
-    Upload a book to Google Drive and register it in the library.
-    
-    Examples:
-    bookshell push "MyBook.pdf" -c "Fiction"  (Upload single file)
-    bookshell push --all                      (Upload everything missing)
-    """
+    """Upload books to Drive. [Flags: --all, --category]"""
     
     if all:
          # Bulk Push Logic
@@ -453,14 +433,7 @@ def sync(
     remote: bool = typer.Option(False, "--remote", "-r", help="Pull Drive changes to Local (Priority: Remote). Use this to download missing files."),
     all: bool = typer.Option(False, "--all", "-a", help="Bidirectional Sync. Performs both Push and Pull to ensure libraries are identical.")
 ):
-    """
-    Synchronize your library between Local and Google Drive.
-    
-    Modes:
-    --local (-l):  Uploads local files that are missing on Drive.
-    --remote (-r): Downloads Drive files that are missing locally.
-    --all (-a):    Does both! The ultimate sync command.
-    """
+    """Smart Sync: Push, Pull, or Bidirectional. [Flags: --all, --local, --remote]"""
     
     if not (local or remote or all):
         console.print("[yellow]Please specify a mode: --local, --remote, or --all[/yellow]")
@@ -478,7 +451,7 @@ def sync(
 
 @app.command()
 def share():
-    """Share books or your entire library via Google Drive links."""
+    """Share books via Google Drive Links. [Interactive]"""
     
     choice = inquirer.select(
         message="What would you like to share?",
@@ -551,7 +524,7 @@ def organize(
     book_name: str = typer.Argument(None, help="Name of the book to move"),
     category: str = typer.Argument(None, help="New category name")
 ):
-    """Move a book to a different category (Folder) and sync changes."""
+    """Move books between categories (Local + Drive). [Interactive]"""
     
     local_files = list_local_files()
     
@@ -652,11 +625,7 @@ def organize(
 def delete(
     book_name: str = typer.Argument(None, help="Name of the book to delete"),
 ):
-    """
-    Delete a book from Local Library, Google Drive, or Both.
-    
-    Safety: Bulk deletion (--all) is NOT supported to prevent data loss.
-    """
+    """Delete a book from Local or Drive. [Interactive, No --all]"""
     
     # 1. Select Book
     if not book_name:
