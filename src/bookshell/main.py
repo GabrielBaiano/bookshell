@@ -5,7 +5,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
-from bookshell.core.drive_logic import get_or_create_folder, list_drive_files
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from InquirerPy import inquirer
+from bookshell.core.drive_logic import get_or_create_folder, list_drive_files, upload_book, update_description, move_file, get_or_create_subfolder, download_book
 from bookshell.core.library import list_local_files
 from bookshell.core import database_manager
 
@@ -13,55 +15,434 @@ app = typer.Typer()
 console = Console()
 
 @app.command()
-def list():
+def list(category: str = typer.Option(None, "--category", "-c", help="Filter by category")):
     """Display all books in your local folder and on Google Drive."""
-    console.print(Panel("[bold blue]Bookshell Library[/bold blue]"))
+    console.print(Panel("[bold blue]Bookshell Library[/bold blue]", expand=False))
     
-    # 1. Local Files
+    # 1. Fetch data
     local_books = list_local_files()
-    
-    # 2. Drive Files
     with console.status("[bold green]Checking Google Drive...") as status:
         drive_books = list_drive_files()
 
-    table = Table(title="Your Books", show_header=True, header_style="bold magenta")
-    table.add_column("Source", style="dim")
-    table.add_column("Title")
-    table.add_column("Size (MB)", justify="right")
+    # 2. Merge logic
+    library = {}
+    for b in local_books:
+        library[b["name"]] = {
+            "local": True, 
+            "drive": False, 
+            "size": b["size"], 
+            "cat_local": b.get("category"),
+            "cat_drive": None,
+            "status": "new"
+        }
+    
+    for b in drive_books:
+        name = b["name"]
+        size = int(b.get('size', 0))
+        b_cat = b.get('category')
+        
+        # Parse status from description
+        description = b.get('description', '')
+        status_code = "new"
+        if description:
+            if '[reading]' in description: status_code = "reading"
+            elif '[finished]' in description: status_code = "finished"
 
-    # Add Local Books
-    for book in local_books:
-        table.add_row(
-            "💻 Local", 
-            book["name"], 
-            f"{book['size'] / (1024*1024):.2f}"
-        )
+        if name in library:
+            library[name]["drive"] = True
+            library[name]["cat_drive"] = b_cat
+            library[name]["status"] = status_code
+        else:
+            library[name] = {
+                "local": False, 
+                "drive": True, 
+                "size": size, 
+                "cat_local": None,
+                "cat_drive": b_cat,
+                "status": status_code
+            }
 
-    # Add Drive Books
-    # Identify which drive books are also local to avoid duplicates if needed, 
-    # but for now let's just show them all separately to see the "sync status"
-    for book in drive_books:
-        # Check if already in local
-        is_local = any(lb["name"] == book["name"] for lb in local_books)
-        source = "☁️ Drive"
-        if is_local:
-            source = "✅ Synced"
+    # 2.5 Filtering
+    if category:
+        c_lower = category.lower()
+        library = {n: info for n, info in library.items() 
+                   if (info["cat_local"] and info["cat_local"].lower() == c_lower) or
+                      (info["cat_drive"] and info["cat_drive"].lower() == c_lower)}
+
+    if not library:
+        if category:
+            console.print(f"[yellow]No books found in category '{category}'.[/yellow]")
+        else:
+            console.print("[yellow]Your library is empty. Add some PDF or EPUB files![/yellow]")
+        return
+
+    # 3. Render Minimalist List
+    for name, info in sorted(library.items()):
+        if info["local"] and info["drive"]:
+            sync_icon = "[bold green][✨ Synced][/bold green]"
+        elif info["local"]:
+            sync_icon = "[bold blue][📂 Local ][/bold blue]"
+        else:
+            sync_icon = "[bold cyan][☁️ Drive ][/bold cyan]"
+        
+        # Status Text
+        status_map = {
+            "reading": "[bold yellow][ Reading  ][/bold yellow]",
+            "finished": "[bold green][ Finished ][/bold green]",
+            "new": "[dim][ Pending  ][/dim]"
+        }
+        status_text = status_map.get(info["status"], "[dim][ Pending  ][/dim]")
+
+        display_cat = info["cat_local"] or info["cat_drive"]
+        size_mb = info["size"] / (1024 * 1024)
+        cat_str = f"[bold magenta][{display_cat:^9}][/bold magenta]" if display_cat else "[dim][ General ][/dim]"
+        
+        console.print(f"{sync_icon} {status_text} {cat_str} [dim][{size_mb:5.2f} MB][/dim] {name}")
+
+@app.command()
+def mark(book_name: str, status: str = typer.Option(..., "--status", "-s", help="Status: reading, finished, new")):
+    """Update the reading status of a book."""
+    status = status.lower()
+    if status not in ['reading', 'finished', 'new']:
+        console.print("[red]Invalid status. Use: reading, finished, or new.[/red]")
+        raise typer.Exit(1)
+        
+    drive_books = list_drive_files()
+    target_book = next((b for b in drive_books if b['name'] == book_name), None)
+    
+    if not target_book:
+        console.print(f"[red]Book '{book_name}' not found on Drive. Please push it first.[/red]")
+        raise typer.Exit(1)
+        
+    new_desc = f"[{status}] Updated via Bookshell"
+    update_description(target_book['id'], new_desc)
+    console.print(f"Status for [bold]{book_name}[/bold] updated to [bold blue]{status}[/bold blue]! [green]✔[/green]")
+
+def format_size(size_bytes):
+    # Helper to format bytes to MB/KB
+    if size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    return f"{size_bytes} B"
+
+@app.command()
+def pull(
+    book_name: str = typer.Argument(None, help="Name of the book to download"),
+    all: bool = typer.Option(False, "--all", "-a", help="Download all books from Drive that are missing locally")
+):
+    """Download books from Google Drive to your local library."""
+    local_root = Path(database_manager.get_config("local_path"))
+    
+    if all:
+        # Bulk Pull Logic
+        console.print("[bold cyan]Checking for missing files...[/bold cyan]")
+        drive_books = list_drive_files()
+        local_files = list_local_files()
+        local_names = {f['name'] for f in local_files}
+        
+        to_download = [b for b in drive_books if b['name'] not in local_names]
+        
+        if not to_download:
+            console.print("[green]All Drive books are already downloaded! ✨[/green]")
+            return
+
+        total_size = sum(int(b.get('size', 0)) for b in to_download)
+        count = len(to_download)
+        
+        console.print(f"\n[bold]Found {count} files to download:[/bold]")
+        for b in to_download[:5]: # Show first 5
+             console.print(f" - {b['name']}")
+        if count > 5: console.print(f" ... and {count - 5} more.")
+        
+        formatted_size = format_size(total_size)
+        if not Confirm.ask(f"\n[bold yellow][?][/bold yellow] Do you want to download {count} files ({formatted_size})?"):
+            console.print("[red]Aborted.[/red]")
+            raise typer.Exit()
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"[cyan]Downloading {count} files...[/cyan]", total=count)
             
-        table.add_row(
-            source,
-            book["name"],
-            f"{int(book.get('size', 0)) / (1024*1024):.2f}" if book.get('size') else "N/A"
-        )
+            for book in to_download:
+                category = book.get('category')
+                target_dir = local_root / category if category else local_root
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / book['name']
+                
+                success = download_book(book['id'], str(target_path))
+                if success:
+                    database_manager.save_book(
+                        title=book['name'],
+                        drive_id=book['id'],
+                        local_path=str(target_path),
+                        category=category
+                    )
+                progress.advance(task)
+        
+        console.print(f"[green]Successfully downloaded {count} files! ✔[/green]")
+        return
 
-    if not local_books and not drive_books:
-        console.print("[yellow]Your library is empty. Add some PDF or EPUB files![/yellow]")
+    # Single File Pull Logic
+    if not book_name:
+         console.print("[red]Please provide a book name or use --all.[/red]")
+         raise typer.Exit(1)
+
+    drive_books = list_drive_files()
+    target_book = next((b for b in drive_books if b['name'] == book_name), None)
+    
+    if not target_book:
+        console.print(f"[red]Book '{book_name}' not found on Drive.[/red]")
+        raise typer.Exit(1)
+        
+    category = target_book.get('category')
+    target_dir = local_root / category if category else local_root
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / book_name
+    
+    if target_path.exists():
+        console.print(f"[yellow]File '{book_name}' already exists locally.[/yellow]")
+        return
+
+    console.print(f"Downloading [bold]{book_name}[/bold]...")
+    success = download_book(target_book['id'], str(target_path))
+    
+    if success:
+         database_manager.save_book(
+            title=book_name,
+            drive_id=target_book['id'],
+            local_path=str(target_path),
+            category=category
+        )
+         console.print(f"[green]Downloaded successfully to {target_path} ✔[/green]")
     else:
-        console.print(table)
+         console.print("[red]Download failed.[/red]")
+
+
+def _push_single_file(path: Path, category: str = None):
+    # Core logic for pushing a single file
+    
+    # Auto-detect category from local folder if not provided
+    if not category:
+        try:
+            local_root = Path(database_manager.get_config("local_path"))
+            relative = path.relative_to(local_root)
+            if len(relative.parts) > 1:
+                category = relative.parts[0]
+        except (ValueError, TypeError):
+            pass
+
+    console.print(Panel(f"[bold blue]Pushing:[/bold blue] {path.name}", expand=False))
+    if category:
+        console.print(f"Category: [bold magenta]{category}[/bold magenta]")
+
+    # Check for existing file on Drive (Conflict Resolution)
+    drive_books = list_drive_files()
+    existing_files = [b for b in drive_books if b['name'] == path.name]
+    
+    existing_file = None
+    if len(existing_files) > 1:
+        console.print(f"\n[bold red]Duplicate Conflict:[/bold red] Found {len(existing_files)} copies of '{path.name}' on Drive.")
+        choices = []
+        for i, f in enumerate(existing_files):
+            cat = f.get('category') or 'General'
+            choices.append({"name": f"{i+1}. {cat} (ID: ...{f['id'][-4:]})", "value": f})
+        
+        choices.append({"name": "Skip this file", "value": "skip"})
+        
+        selected = inquirer.select(
+            message="Which Drive file is the correct version to sync with?",
+            choices=choices,
+        ).execute()
+        
+        if selected == 'skip':
+            console.print("[yellow]Skipping duplicate resolution.[/yellow]")
+            return
+        existing_file = selected
+    elif existing_files:
+        existing_file = existing_files[0]
+
+    if existing_file:
+        drive_cat = existing_file.get('category')
+        
+        # strict equality check for category (None vs None, or str vs str)
+        cats_match = (category is None and drive_cat is None) or \
+                     (category and drive_cat and category.lower() == drive_cat.lower())
+
+        if not cats_match:
+            console.print(f"\n[bold red]Conflict Detected:[/bold red] '{path.name}'")
+            console.print(f"Drive Category: [cyan]{drive_cat or 'General'}[/cyan]")
+            console.print(f"Local Category: [magenta]{category or 'General'}[/magenta]")
+            
+            choice = inquirer.select(
+                message="How do you want to resolve this?",
+                choices=[
+                    {"name": f"Use Local (Move to {category or 'General'})", "value": "local"},
+                    {"name": f"Use Drive (Keep in {drive_cat or 'General'})", "value": "drive"},
+                    {"name": "Skip this file", "value": "skip"},
+                ],
+            ).execute()
+            
+            if choice == 'skip':
+                console.print("[yellow]Skipped.[/yellow]")
+                return
+            elif choice == 'local':
+                # Move file on Drive to match local Category
+                console.print(f"[yellow]Moving file on Drive onto '{category or 'General'}'...[/yellow]")
+                folder_id = database_manager.get_config("root_folder_id")
+                target_folder_id = get_or_create_subfolder(folder_id, category) if category else folder_id
+                move_file(existing_file['id'], existing_file.get('parents', []), target_folder_id)
+                console.print("[green]File moved successfully![/green]")
+                return # Done, no need to upload
+            elif choice == 'drive':
+                 console.print("[yellow]Keeping file as is on Drive.[/yellow]")
+                 return # Done, keeping drive state
+        else:
+             console.print(f"[yellow]File already exists in '{category or 'General'}'. Skipping upload.[/yellow]")
+             return
+
+    # Upload if not exists
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+    ) as progress:
+        progress.add_task(description=f"Uploading {path.name} to Google Drive...", total=None)
+        drive_id = upload_book(str(path), category=category)
+
+    if drive_id:
+        database_manager.save_book(
+            title=path.name,
+            drive_id=drive_id,
+            local_path=str(path),
+            category=category
+        )
+        console.print(f"Success! [bold green]{path.name}[/bold green] is now live and synced. [green]✔[/green]")
+    else:
+        console.print("[red]Upload failed. Please check your connection or Drive quota.[/red]")
+
+
+@app.command()
+def push(
+    file_path: str = typer.Argument(None, help="Path to the book file"), 
+    category: str = typer.Option(None, "--category", "-c", help="Book category (subfolder)"),
+    all: bool = typer.Option(False, "--all", "-a", help="Upload all local books that are missing on Drive")
+):
+    """Upload a book to Google Drive and register it in the library."""
+    
+    if all:
+         # Bulk Push Logic
+        console.print("[bold cyan]Checking for files to upload...[/bold cyan]")
+        local_files = list_local_files()
+        drive_books = list_drive_files()
+        drive_names = {b['name'] for b in drive_books}
+        
+        # Identify files not on Drive (simple name check for now)
+        # Note: robust deduction of 'missing' might need more complex logic if we want to handle conflicts (same name different folder)
+        # But 'push' logic handles existence check, so we just iterate ALL local files?
+        # No, iterating all means checking 1000 files if only 1 is new. 
+        # Better to filter those that are definitely NOT on drive by name.
+        # However, the user wants Smart Push (Conflict Resolution).
+        # Use case: User moved file locally to new folder. 'push --all' should detect conflict and ask to move?
+        # If I filter by name IN drive_names, I miss the "Move" opportunity?
+        # Actually, existing 'push' logic handles "Move" if name exists. 
+        # So we SHOULD include files that exist on Drive to check for category mismatch?
+        # That would mean 'push --all' runs interactively for EVERY file in the library. That's annoying.
+        # Compromise: check all files, but silent-skip if category matches?
+        # My `_push_single_file` prints "File already exists... Skipping" logic.
+        # Let's just process files that are NOT fully synced (missing or category mismatch).
+        
+        to_process = []
+        drive_map = {b['name']: b for b in drive_books}
+        
+        for f in local_files:
+            d_file = drive_map.get(f['name'])
+            # Condition to process:
+            # 1. Not on Drive
+            # 2. On Drive but category mismatch (and we want to fix it)
+            
+            if not d_file:
+                to_process.append(f)
+            else:
+                # Check category mismatch
+                local_cat = f.get('category')
+                drive_cat = d_file.get('category')
+                
+                match = (local_cat is None and drive_cat is None) or \
+                        (local_cat and drive_cat and local_cat.lower() == drive_cat.lower())
+                
+                if not match:
+                    to_process.append(f)
+
+        if not to_process:
+            console.print("[green]All local files are synced to Drive! ✨[/green]")
+            return
+
+        total_size = sum(int(f.get('size', 0)) for f in to_process)
+        count = len(to_process)
+        
+        console.print(f"\n[bold]Found {count} files to push (upload or fix category):[/bold]")
+        for f in to_process[:5]: 
+             console.print(f" - {f['name']}")
+        if count > 5: console.print(f" ... and {count - 5} more.")
+        
+        formatted_size = format_size(total_size)
+        if not Confirm.ask(f"\n[bold yellow][?][/bold yellow] Do you want to push/sync {count} files ({formatted_size})?"):
+            console.print("[red]Aborted.[/red]")
+            raise typer.Exit()
+
+        # Process
+        for f in to_process:
+            path = Path(f['path'])
+            _push_single_file(path, category=category)
+        
+        console.print(f"[green]Bulk push completed! ✔[/green]")
+        return
+
+    # Single File Logic
+    if not file_path:
+        console.print("[red]Please provide a file path or use --all.[/red]")
+        raise typer.Exit(1)
+        
+    path = Path(file_path).expanduser().resolve()
+    
+    if not path.exists():
+        console.print(f"[red]Error: File '{file_path}' not found.[/red]")
+        raise typer.Exit(1)
+
+    _push_single_file(path, category)
+
+@app.command()
+def sync(
+    local: bool = typer.Option(False, "--local", "-l", help="Push all local changes to Drive (Push All)"),
+    remote: bool = typer.Option(False, "--remote", "-r", help="Pull all Drive changes to Local (Pull All)"),
+    all: bool = typer.Option(False, "--all", "-a", help="Bidirectional Sync (Push + Pull)")
+):
+    """Synchronize your library (Push, Pull, or Both)."""
+    
+    if not (local or remote or all):
+        console.print("[yellow]Please specify a mode: --local, --remote, or --all[/yellow]")
+        return
+
+    if local or all:
+        console.print(Panel("[bold blue]Starting Push Sync (Local -> Remote)[/bold blue]", expand=False))
+        push(file_path=None, category=None, all=True)
+    
+    if remote or all:
+        console.print(Panel("[bold cyan]Starting Pull Sync (Remote -> Local)[/bold cyan]", expand=False))
+        pull(book_name=None, all=True)
+    
+    console.print("\n[bold green]✨ Synchronization Complete! ✨[/bold green]")
 
 @app.command()
 def setup():
     """Complete initial setup flow."""
-    console.print(Panel("[bold blue]Welcome to Bookshell[/bold blue]", subtitle="Initial Setup"))
+    console.print(Panel("[bold blue]Welcome to Bookshell[/bold blue]", subtitle="Initial Setup", expand=False))
     
     # Initialize Database
     database_manager.init_db()
@@ -72,7 +453,7 @@ def setup():
     setup_type = inquirer.select(
         message="How would you like to configure Bookshell?",
         choices=[
-            {"name": "Standard (recommended: ~/Bookshell)", "value": "default"},
+            {"name": "Standard (recommended: ~/Bookshell_Library)", "value": "default"},
             {"name": "Manual (custom install path)", "value": "manual"},
         ],
         default="default",
@@ -133,16 +514,11 @@ def setup():
 1. [blue]Automatic:[/blue] Just drop any PDF/EPUB in your local folder.
 2. [blue]Manual:[/blue] Use the command [bold yellow]bookshell push "path/to/book.pdf"[/bold yellow].
 3. [blue]Cloud:[/blue] Add books directly to the 'Bookshell' folder in your Google Drive.
+4. [blue]Marking:[/blue] Use [bold]bookshell mark "book.pdf" -s reading[/bold] to update status.
 
 Use [bold]bookshell --help[/bold] to see all available commands.
     """
-    console.print(Panel(instructions, title="[bold green]Ready to go![/bold green]", border_style="green"))
-
-@app.command()
-def push(path: str):
-    """Upload a local book to Google Drive."""
-    console.print(f"Uploading [cyan]{path}[/cyan] to Google Drive...")
-    # Logic: Upload -> Get Link -> Save to Local DB
+    console.print(Panel(instructions, title="[bold green]Ready to go![/bold green]", border_style="green", expand=False))
 
 if __name__ == "__main__":
     app()
