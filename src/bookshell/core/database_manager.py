@@ -70,6 +70,16 @@ def list_cached_books():
     conn.close()
     return books
 
+    return books
+
+def delete_book_by_name(title):
+    """Removes a book from the database by its title."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM books WHERE title = ?', (title,))
+    conn.commit()
+    conn.close()
+
 if __name__ == "__main__":
     print("Initialising database...")
     init_db()

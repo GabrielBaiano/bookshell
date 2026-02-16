@@ -8,11 +8,28 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from InquirerPy import inquirer
-from bookshell.core.drive_logic import get_or_create_folder, list_drive_files, upload_book, update_description, move_file, get_or_create_subfolder, download_book, set_file_visibility
+from bookshell.core.drive_logic import get_or_create_folder, list_drive_files, upload_book, update_description, move_file, get_or_create_subfolder, download_book, set_file_visibility, delete_file
 from bookshell.core.library import list_local_files
 from bookshell.core import database_manager
 
-app = typer.Typer()
+app = typer.Typer(
+    help="""
+    [bold blue]Bookshell CLI[/bold blue] - Your personal library manager + Google Drive Sync.
+
+    [bold]Common Commands:[/bold]
+    [green]sync[/green]      Smart synchronization (Push/Pull/Both).
+    [green]list[/green]      Show all books (Local + Drive).
+    [green]push[/green]      Upload a specific book.
+    [green]pull[/green]      Download a specific book.
+    [green]share[/green]     Generate public links.
+    [green]organize[/green]  Move books between categories.
+
+    [bold]Sync Flags (for 'sync' command):[/bold]
+    --all (-a)    [cyan]Full Sync (Push + Pull)[/cyan]
+    --local (-l)  [cyan]Push Only (Local -> Cloud)[/cyan]
+    --remote (-r) [cyan]Pull Only (Cloud -> Local)[/cyan]
+    """
+)
 console = Console()
 
 @app.command()
@@ -129,10 +146,16 @@ def format_size(size_bytes):
 
 @app.command()
 def pull(
-    book_name: str = typer.Argument(None, help="Name of the book to download"),
-    all: bool = typer.Option(False, "--all", "-a", help="Download all books from Drive that are missing locally")
+    book_name: str = typer.Argument(None, help="Name of the book to download (Optional if using --all)"),
+    all: bool = typer.Option(False, "--all", "-a", help="Download ALL books from Drive that are missing locally")
 ):
-    """Download books from Google Drive to your local library."""
+    """
+    Download books from Google Drive to your local library.
+    
+    Examples:
+    bookshell pull "MyBook.pdf"   (Download single file)
+    bookshell pull --all          (Download everything missing)
+    """
     local_root = Path(database_manager.get_config("local_path"))
     
     if all:
@@ -330,11 +353,17 @@ def _push_single_file(path: Path, category: str = None):
 
 @app.command()
 def push(
-    file_path: str = typer.Argument(None, help="Path to the book file"), 
+    file_path: str = typer.Argument(None, help="Path to the book file (Optional if using --all)"), 
     category: str = typer.Option(None, "--category", "-c", help="Book category (subfolder)"),
-    all: bool = typer.Option(False, "--all", "-a", help="Upload all local books that are missing on Drive")
+    all: bool = typer.Option(False, "--all", "-a", help="Upload ALL local books that are missing on Drive")
 ):
-    """Upload a book to Google Drive and register it in the library."""
+    """
+    Upload a book to Google Drive and register it in the library.
+    
+    Examples:
+    bookshell push "MyBook.pdf" -c "Fiction"  (Upload single file)
+    bookshell push --all                      (Upload everything missing)
+    """
     
     if all:
          # Bulk Push Logic
@@ -615,6 +644,100 @@ def organize(
     # 5. Sync Prompt
     if Confirm.ask("\n[bold blue]Do you want to sync changes now?[/bold blue]"):
         push(file_path=None, category=None, all=True)
+
+    if Confirm.ask("\n[bold blue]Do you want to sync changes now?[/bold blue]"):
+        push(file_path=None, category=None, all=True)
+
+@app.command()
+def delete(
+    book_name: str = typer.Argument(None, help="Name of the book to delete"),
+):
+    """
+    Delete a book from Local Library, Google Drive, or Both.
+    
+    Safety: Bulk deletion (--all) is NOT supported to prevent data loss.
+    """
+    
+    # 1. Select Book
+    if not book_name:
+        # Combine local and drive books for selection
+        local_files = list_local_files()
+        local_names = {f['name'] for f in local_files}
+        
+        drive_books = list_drive_files()
+        drive_names = {f['name'] for f in drive_books}
+        
+        all_books = sorted(list(local_names | drive_names))
+        
+        if not all_books:
+            console.print("[yellow]No books found.[/yellow]")
+            return
+            
+        book_name = inquirer.fuzzy(
+            message="Select a book to delete:",
+            choices=all_books,
+        ).execute()
+
+    console.print(Panel(f"[bold red]Deleting:[/bold red] {book_name}", expand=False))
+
+    # 2. Check existence
+    local_path = None
+    local_files = list_local_files()
+    local_file = next((f for f in local_files if f['name'] == book_name), None)
+    if local_file:
+        local_path = Path(local_file['path'])
+
+    drive_file = None
+    drive_books = list_drive_files()
+    drive_file = next((b for b in drive_books if b['name'] == book_name), None)
+
+    if not local_path and not drive_file:
+        console.print("[red]Book not found anywhere.[/red]")
+        return
+
+    # 3. Interactive Target Selection
+    choices = []
+    if local_path: choices.append({"name": "Local File (Delete from PC)", "value": "local"})
+    if drive_file: choices.append({"name": "Drive File (Delete from Cloud)", "value": "drive"})
+    choices.append({"name": "Both (Delete Everywhere)", "value": "both"})
+    choices.append({"name": "Cancel", "value": "cancel"})
+
+    target = inquirer.select(
+        message="Where do you want to delete this book from?",
+        choices=choices,
+    ).execute()
+
+    if target == "cancel":
+        console.print("[yellow]Deletion cancelled.[/yellow]")
+        return
+
+    # 4. Confirmation
+    if not Confirm.ask(f"[bold red]Are you SURE you want to delete '{book_name}' from {target.upper()}?[/bold red]"):
+        console.print("[red]Cancelled.[/red]")
+        return
+
+    # 5. Execute Deletion
+    # Local
+    if target in ["local", "both"] and local_path:
+        try:
+            os.remove(local_path)
+            console.print(f"[green]✔ Local file deleted: {local_path}[/green]")
+        except Exception as e:
+            console.print(f"[red]Error deleting local file: {e}[/red]")
+
+    # Drive
+    if target in ["drive", "both"] and drive_file:
+        if delete_file(drive_file['id']):
+             console.print(f"[green]✔ Drive file deleted (Moved to Trash).[/green]")
+        else:
+             console.print(f"[red]Error deleting Drive file.[/red]")
+
+    # Database Cleanup
+    # Always try to remove from DB if we deleted something
+    database_manager.delete_book_by_name(book_name)
+    console.print("[dim]Database record updated.[/dim]")
+    
+    console.print("[bold green]Deletion complete.[/bold green]")
 
 @app.command()
 def setup():

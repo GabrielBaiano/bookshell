@@ -299,6 +299,27 @@ def set_file_visibility(file_id, public=True):
             print(f"Error reverting privacy: {e}")
             return False
 
+            print(f"Error reverting privacy: {e}")
+            return False
+
+def delete_file(file_id):
+    """
+    Deletes a file from Google Drive (moves to trash).
+    """
+    service = get_drive_service_object()
+    if not service:
+        return False
+
+    try:
+        service.files().update(
+            fileId=file_id,
+            body={'trashed': True}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Error deleting file from Drive: {e}")
+        return False
+
 if __name__ == "__main__":
     print("Starting folder verification on Google Drive...")
     folder_id = get_or_create_folder()
