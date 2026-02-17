@@ -1,9 +1,14 @@
-from bookshell.core.drive_logic import get_drive_service_object
+from bookshell.services.drive_service import DriveService
 from bookshell.core.database_manager import get_config
 
-service = get_drive_service_object()
+drive_service = DriveService()
+service = drive_service.service
 root_id = get_config("root_folder_id")
 print(f"Root Folder ID: {root_id}")
+
+if not service:
+    print("Failed to connect to Drive.")
+    exit(1)
 
 # 1. List subfolders
 query_folders = f"'{root_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
