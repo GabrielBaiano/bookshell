@@ -26,6 +26,7 @@ def init_db():
             drive_id TEXT NOT NULL,
             category TEXT,
             local_path TEXT,
+            progress INTEGER DEFAULT 0,
             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -50,14 +51,14 @@ def get_config(key):
     conn.close()
     return result[0] if result else None
 
-def save_book(title, drive_id, category=None, local_path=None):
+def save_book(title, drive_id, category=None, local_path=None, progress=0):
     """Registers a new book in the local database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO books (title, drive_id, category, local_path)
-        VALUES (?, ?, ?, ?)
-    ''', (title, drive_id, category, local_path))
+        INSERT OR REPLACE INTO books (title, drive_id, category, local_path, progress)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (title, drive_id, category, local_path, progress))
     conn.commit()
     conn.close()
 
@@ -65,7 +66,7 @@ def list_cached_books():
     """Returns the list of locally saved books (works offline)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT title, category, drive_id FROM books ORDER BY title ASC')
+    cursor.execute('SELECT title, category, drive_id, progress FROM books ORDER BY title ASC')
     books = cursor.fetchall()
     conn.close()
     return books

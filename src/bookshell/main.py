@@ -1,5 +1,6 @@
 import os
 import shutil
+import platform
 from pathlib import Path
 import typer
 from rich.console import Console
@@ -13,6 +14,7 @@ from bookshell.core.database_manager import init_db, save_config, get_config, sa
 # Note: kept save_book and delete_book_by_name to avoid breaking potential external tools or tests relying on DB, 
 # although main.py logic now relies on services.
 from bookshell.core.models import Book, BookStatus
+from bookshell.core.reader_manager import ReaderManager
 from bookshell.services.drive_service import DriveService
 from bookshell.services.local_service import LocalService
 from bookshell.services.sync_service import SyncService
@@ -70,13 +72,21 @@ def list(category: str = typer.Option(None, "--category", "-c", help="Filter by 
         size_mb = book.size / (1024 * 1024)
         cat_str = f"[bold magenta][{display_cat:^9}][/bold magenta]" if display_cat else "[dim][ General ][/dim]"
         
-        console.print(f"{sync_icon} {status_text} {cat_str} [dim][{size_mb:5.2f} MB][/dim] {book.name}")
+        progress_str = f"[bold cyan][ {book.progress:3}% ][/bold cyan]" if book.progress > 0 else "[dim][   0% ][/dim]"
+        
+        console.print(f"{sync_icon} {status_text} {progress_str} {cat_str} [dim][{size_mb:5.2f} MB][/dim] {book.name}")
 
 @app.command()
-def mark(book_name: str, status: str = typer.Option(..., "--status", "-s", help="Status: reading, finished, new")):
-    """Update reading status (reading, finished, new). [Flags: --status]"""
-    status_enum = BookStatus.from_string(status)
-    
+def mark(
+    book_name: str, 
+    status: str = typer.Option(None, "--status", "-s", help="Status: reading, finished, new"),
+    progress: int = typer.Option(None, "--progress", "-p", help="Reading progress (0-100)")
+):
+    """Update reading status and progress. [Flags: --status, --progress]"""
+    if status is None and progress is None:
+        console.print("[red]Please provide --status or --progress.[/red]")
+        raise typer.Exit(1)
+
     drive_service = DriveService()
     sync_service = SyncService()
     
@@ -91,10 +101,33 @@ def mark(book_name: str, status: str = typer.Option(..., "--status", "-s", help=
         console.print(f"[red]Book '{book_name}' is not on Drive. Please push it first to track status.[/red]")
         raise typer.Exit(1)
 
+    # Update local/target book object
+    if status:
+        target_book.status = BookStatus.from_string(status)
+    if progress is not None:
+        target_book.progress = min(max(progress, 0), 100)
+        if target_book.progress == 100:
+            target_book.status = BookStatus.FINISHED
+        elif target_book.progress > 0 and target_book.status == BookStatus.NEW:
+            target_book.status = BookStatus.READING
+
     # Simplified description update
-    new_desc = f"[{status_enum.value}] Updated via Bookshell"
+    status_label = target_book.status.value.upper()
+    new_desc = f"[{status_label}] [{target_book.progress}%] Updated via Bookshell"
+    
     drive_service.update_description(target_book.drive_id, new_desc)
-    console.print(f"Status for [bold]{book_name}[/bold] updated to [bold blue]{status_enum.value}[/bold blue]! [green]✔[/green]")
+    
+    # Also update local DB
+    from bookshell.core.database_manager import save_book
+    save_book(
+        target_book.name, 
+        target_book.drive_id, 
+        target_book.category, 
+        target_book.local_path, 
+        target_book.progress
+    )
+
+    console.print(f"Updated [bold]{book_name}[/bold]: [bold yellow]{status_label}[/bold yellow] at [bold cyan]{target_book.progress}%[/bold cyan]! [green]✔[/green]")
 
 def format_size(size_bytes):
     if size_bytes >= 1024 * 1024:
@@ -148,12 +181,56 @@ def pull(
          console.print("[red]Please provide a book name or use --all.[/red]")
          raise typer.Exit(1)
 
-    console.print(f"Downloading [bold]{book_name}[/bold]...")
-    result = sync_service.sync_pull(book_name=book_name)
-    if result:
-         console.print(f"[green]Downloaded successfully ✔[/green]")
+@app.command()
+def open(book_name: str = typer.Argument(..., help="Name of the book to open")):
+    """Open a book with the preferred reader. Automatically syncs progress if supported."""
+    sync_service = SyncService()
+    reader_manager = ReaderManager()
+    local_service = LocalService()
+    
+    library = sync_service.get_library()
+    book = next((b for b in library if b.name == book_name), None)
+    
+    if not book:
+        console.print(f"[red]Book '{book_name}' not found.[/red]")
+        return
+
+    if not book.local_path:
+        # Ask to download
+        if Confirm.ask(f"[yellow]'{book_name}' is not local. Download and open?[/yellow]"):
+            sync_service.sync_pull(book_name=book_name)
+            # Re-fetch local path
+            book = next((b for b in sync_service.get_library() if b.name == book_name), None)
+        else:
+            return
+
+    if not book.local_path:
+        console.print("[red]Could not locate file path.[/red]")
+        return
+
+    reader = reader_manager.get_preferred_reader()
+    reader_name = reader.name if reader else "System Default"
+    
+    console.print(f"Opening [bold]{book_name}[/bold] with [bold blue]{reader_name}[/bold blue]...")
+    
+    # Sync progress FROM reader before opening (if Bookshell has newer, we might want to push, but usually reader is source of truth for current device)
+    # However, for now, we just open it.
+    
+    if reader_manager.open_with_reader(str(book.local_path), reader):
+        console.print("[green]Enjoy your reading! 📖[/green]")
+        
+        # After closing, we could try to sync progress BACK
+        # But subprocess.Popen is non-blocking. 
+        # For blocking behavior we'd need wait().
+        # Let's keep it simple: inform the user to use 'mark' or sync if needed.
+        if reader:
+            new_progress = reader.get_progress(str(book.local_path))
+            if new_progress > book.progress:
+                console.print(f"[dim]Detected progress update: {new_progress}%[/dim]")
+                book.progress = new_progress
+                # We'll need a way to auto-sync this later or just tell user.
     else:
-         console.print("[red]Download failed or book not found on Drive.[/red]")
+        console.print("[red]Failed to open book.[/red]")
 
 
 @app.command()
@@ -488,6 +565,25 @@ def setup():
             raise typer.Exit()
             
     save_config("local_path", folder_path)
+
+    # 1.5 Reader Setup (Linux Only)
+    if platform.system().lower() == "linux":
+        console.print("\n[yellow]Step 1.5: Reader Configuration (Linux)[/yellow]")
+        reader_manager = ReaderManager()
+        foliate = next((r for r in reader_manager.available_readers if r.name == "Foliate"), None)
+        
+        if foliate and not foliate.is_installed():
+            if Confirm.ask("Would you like to install the Foliate Ebook Reader (Recommended)?", default=True):
+                console.print(f"Running: [dim]{foliate.install_command}[/dim]")
+                os.system(foliate.install_command)
+                if foliate.is_installed():
+                    console.print("Foliate installed! [green]✔[/green]")
+                    reader_manager.set_preferred_reader("Foliate")
+                else:
+                    console.print("[red]Installation failed or cancelled.[/red]")
+        elif foliate and foliate.is_installed():
+            console.print("Foliate is already installed. [green]✔[/green]")
+            reader_manager.set_preferred_reader("Foliate")
 
     # 2. Drive
     console.print("\n[yellow]Step 2: Google Drive Configuration[/yellow]")

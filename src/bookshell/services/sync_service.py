@@ -27,6 +27,7 @@ class SyncService:
                 existing = library[b.name]
                 existing.drive_id = b.drive_id
                 existing.status = b.status
+                existing.progress = max(existing.progress, b.progress)
                 # If local category is missing, use drive category
                 if not existing.category:
                     existing.category = b.category

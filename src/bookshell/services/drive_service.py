@@ -2,6 +2,7 @@ from pathlib import Path
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
+import re
 
 from bookshell.core.drive import get_drive_service
 from bookshell.core.models import Book, BookStatus
@@ -74,16 +75,24 @@ class DriveService:
         books = []
         for f in results:
             status = BookStatus.NEW
+            progress = 0
             desc = f.get('description', '')
             if desc:
-                if '[reading]' in desc: status = BookStatus.READING
-                elif '[finished]' in desc: status = BookStatus.FINISHED
+                # Extract status
+                if '[reading]' in desc.lower(): status = BookStatus.READING
+                elif '[finished]' in desc.lower(): status = BookStatus.FINISHED
+                
+                # Extract progress % (e.g., [50%])
+                prog_match = re.search(r'\[(\d+)%\]', desc)
+                if prog_match:
+                    progress = int(prog_match.group(1))
             
             books.append(Book(
                 name=f['name'],
                 size=int(f.get('size', 0)),
                 drive_id=f['id'],
                 status=status,
+                progress=progress,
                 description=desc
             ))
         return books

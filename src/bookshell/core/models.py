@@ -22,6 +22,7 @@ class Book:
     drive_id: Optional[str] = None
     local_path: Optional[str] = None
     status: BookStatus = BookStatus.NEW
+    progress: int = 0
     description: Optional[str] = None
 
     @property
